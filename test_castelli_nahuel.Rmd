@@ -1,0 +1,166 @@
+---
+title: "Presentación de datos - Por Castelli Nahuel"
+output:
+  html_document:
+    theme: united
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# Lista de librerías
+librerias <- c("DT", "dplyr", "DBI", "RSQLite", "ggplot2", "car", "WRS2", "tidyr")
+
+# Instalar y cargar librerías si no están instaladas
+for (lib in librerias) {
+  if (!requireNamespace(lib, quietly = TRUE)) {
+    install.packages(lib, dependencies = TRUE)
+  }
+  library(lib, character.only = TRUE)
+}
+```
+
+```{r, include=FALSE}
+#Base
+base <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2023/2023-04-04/soccer21-22.csv')
+
+attach(base)
+```
+
+## Premier League Match Data 2021-2022
+
+Los datos de esta semana provienen de los datos de los partidos de la Premier League 2021-2022 a través de Evan Gower en Kaggle.
+Ver más características en <https://github.com/rfordatascience/tidytuesday/blob/master/data/2023/2023-04-04/readme.md>.
+
+Los datos incluyen equipos participantes, fecha, árbitro y estadísticas para el equipo local y visitante, como faltas, tiros, tarjetas, ¡y más! También se incluye un conjunto de datos de las clasificaciones semanales de la temporada.
+
+```{r}
+# Crear un objeto DataTable
+datatable(base)
+```
+
+# Hipotesis a comprobar
+
+Habiendo realizado un EDA de los datos, pense en 2 hipotesis que me gustaría comprobar. Ellas son 
+
+### 1- En promedio,¿Un equipo de local comete mas faltas que de visitante?
+```{r}
+# Conectarse a la base de datos SQLite (si no existe, se creará)
+test <- dbConnect(RSQLite::SQLite(), dbname = "mi_base_de_datos.sqlite")
+
+# Guardar el dataframe 'base' en la base de datos
+dbWriteTable(test, "base", base, overwrite = TRUE)
+
+# Crear una tabla con estadísticas de faltas local
+query_local <- "SELECT HomeTeam as Equipo, 
+                        sum(HF) as Falta_local,
+                        avg(HF) as promedio_faltas_local
+                 FROM base
+                 GROUP BY HomeTeam"
+
+tabla_local <- dbGetQuery(test, query_local)
+
+# Crear una tabla con estadísticas de faltas visitante
+query_visitante <- "SELECT AwayTeam as Equipo, 
+                           sum(AF) as Falta_visitante,
+                           avg(AF) as promedio_faltas_visitante
+                    FROM base
+                    GROUP BY AwayTeam"
+
+tabla_visitante <- dbGetQuery(test, query_visitante)
+
+# Unir las tablas con una subconsulta e INNER JOIN
+query_final <- sprintf("SELECT tabla_local.Equipo, 
+                              Falta_local, 
+                              promedio_faltas_local, 
+                              Falta_visitante, 
+                              promedio_faltas_visitante
+                       FROM (%s) as tabla_local
+                       INNER JOIN (%s) as tabla_visitante
+                       ON tabla_local.Equipo = tabla_visitante.Equipo", query_local, query_visitante)
+
+resultado_final <- dbGetQuery(test, query_final)
+datatable(resultado_final)
+
+
+```
+
+#Resultados
+Vemos cantidad de faltas de local y visitante son muy similares.
+La media de faltas son:
+```{r}
+#media de faltas siendo local
+mean(resultado_final$promedio_faltas_local)
+
+#media de faltas siendo visitante
+mean(resultado_final$promedio_faltas_visitante)
+```
+
+### 2- ¿Se hacen más goles en el 1er tiempo vs 2do tiempo?
+
+Para comprobar la 2da hipotesis, primero debemos crear nuestra variable de interes. Contamos con variables como goles equipo local y equipo visitante primer tiempo. Y resultado goles full partido por equipo local y tenemos otra para visitante. 
+Entonces nuestra var de interes será construida a partir de estas 4 variables mencionadas.
+
+```{r}
+# Crear una nueva variable "goles_2do_tiempo"
+goles_1er_tiempo <-(HTHG+HTAG)
+goles_full_tiempo <-(FTHG+FTAG)
+goles_2do_tiempo <- goles_full_tiempo-goles_1er_tiempo
+
+#media de goles
+mean(goles_1er_tiempo)
+mean(goles_2do_tiempo)
+
+# Crear un dataframe con las variables de interés
+df_goles <- data.frame(
+  goles_1er_tiempo = c(HTHG + HTAG),
+  goles_2do_tiempo = c(goles_full_tiempo - (HTHG + HTAG))
+)
+
+# Crear el gráfico de histograma para goles en el primer tiempo
+ggplot(df_goles, aes(x = goles_1er_tiempo)) +
+  geom_histogram(binwidth = 1, fill = "skyblue", color = "black", alpha = 0.7) +
+  labs(title = "Distribución de Goles en Primer Tiempo", x = "Goles", y = "Frecuencia") +
+  theme_minimal()
+
+# Crear el gráfico de histograma para goles en el segundo tiempo
+ggplot(df_goles, aes(x = goles_2do_tiempo)) +
+  geom_histogram(binwidth = 1, fill = "salmon", color = "black", alpha = 0.7) +
+  labs(title = "Distribución de Goles en Segundo Tiempo", x = "Goles", y = "Frecuencia") +
+  theme_minimal()
+```
+
+Se observa distribuciones similares, por lo visto, pero una frecuencia mayor infiere que en el 2do tiempo se suelen hacer más goles.
+Para realizar una comparacion pertinentes se realizara un test de medias.
+
+```{r}
+#Test de normalidad, para comprobar si utlizare test PARAMETRICOS (más potentes) o NO PARAMETRICOS
+shapiro.test(df_goles$goles_1er_tiempo)
+shapiro.test(df_goles$goles_2do_tiempo)
+
+#Shapiro-Wilk normality test
+#H0)Los datos se ajustan a una distribucion normal.
+```
+Con un PV <= alpha. Alpha=0.05. Se rechaza la hipotesis nula para ambos casos, no se pueden realizar test parametricos para comparar las medias.
+Por lo tanto proceso por el camino no parametrico con el Test Yuen
+```{r}
+# Usar pivot_longer para transformar el dataframe
+#necesito transformar el DF para realizar test luego, en este caso, tiempo pasa como un factor
+df_goles_longer <- pivot_longer(df_goles, cols = starts_with("goles"), 
+                              names_to = "Tiempo", values_to = "Goles")
+
+# Imprimir el nuevo dataframe
+head(df_goles_longer)
+
+```
+```{r}
+#Test de Yuen (Robusto)
+#es una alternativa a las pruebas de la t de Student y U de Mann-Whitney 
+#para tamaños muestrales pequeños y distribuciones no normales
+yuen(df_goles_longer$Goles ~ df_goles_longer$Tiempo, tr = 0) 
+```
+
+Por lo tanto podemos inferir estadisticamente que, se realizan mas goles en 2do tiempo que en el 1er tiempo. Con el resultado del test inferimos que la media de goles del primer tiempo es diferente a la media de goles del 2do tiempo. Validamos la 2da hipotesis.
+
+
+
